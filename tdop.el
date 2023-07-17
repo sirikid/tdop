@@ -81,3 +81,28 @@
               ((c <- (generate())) \;
                (boole(a c b)))))
            (tdop-env))
+
+
+;; Major mode
+
+(require 'smie)
+
+(defvar tdop-syntax-table
+  (let ((st (make-syntax-table)))
+    (modify-syntax-entry ?\' "$" st)
+    (modify-syntax-entry ?+ "." st)
+    st))
+
+(defvar tdop-smie-grammar
+  (smie-prec2->grammar
+   (smie-bnf->prec2
+    '((expr (expr "<-" expr)
+            (expr ";" expr)
+            (expr "&" expr)
+            ("if" expr "then" expr "else" expr)))
+    '((left ";" "&")
+      (right "<-")))))
+
+(define-derived-mode tdop-mode prog-mode "TDOP"
+  (set-syntax-table tdop-syntax-table)
+  (smie-setup tdop-smie-grammar #'ignore))
