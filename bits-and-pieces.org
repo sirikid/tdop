@@ -150,3 +150,85 @@ prim ::= 0 | 1
 
 #+RESULTS:
 : 0
+
+* Arith
+Что-то вроде арифметики целых положительных чисел.
+
+#+begin_src prog
+expr ::= sum
+sum ::= mul | sum + mul
+mul ::= pow | mul * pow
+pow ::= lit | pow ^ lit
+lit ::= [0-1]+
+#+end_src
+
+#+begin_src emacs-lisp :lexical t :var input="4^3+2*1"
+(require 'cl-lib)
+
+(let ((env (obarray-make)))
+  (cl-flet*
+      ((nud ()
+         (cl-assert (looking-at "\\([0-9]+\\)\\|[+*^]"))
+         (let ((token (match-string 0)))
+           (cond
+            ((get (obarray-get env token) 'nud))
+            ((match-string 1)
+             (lambda ()
+               (string-to-number token)))
+            (t
+             (lambda ()
+               (error "No null denotation: `%s'" token))))))
+
+       (led (left)
+         (cl-assert (looking-at "\\([0-9]+\\)\\|[+*^]"))
+         (let* ((token (match-string 0))
+                (led (get (obarray-get env token) 'led)))
+           (if led
+               (lambda ()
+                 (funcall led left))
+             (lambda ()
+               (error "No left denotation: `%s'" token)))))
+
+       (lbp ()
+         (or (and (looking-at "\\([0-9]+\\)\\|[+*^]")
+                  (get (obarray-get env (match-string 0)) 'lbp))
+             0))
+
+       (advance ()
+         (goto-char (match-end 0)))
+
+       (run (code)
+         (funcall code))
+
+       (parse (rbp)
+         ;; q0
+         (let ((c (nud)))
+           (advance)
+           (let ((left (run c)))
+             ;; q1
+             (while (< rbp (lbp))
+               (setq c (led left))
+               (advance)
+               (setq left (run c)))
+             left))))
+
+    (put (obarray-put env "+") 'lbp 1)
+    (put (obarray-put env "+") 'led (lambda (left) (+ left (parse 1))))
+
+    (put (obarray-put env "*") 'lbp 2)
+    (put (obarray-put env "*") 'led (lambda (left) (* left (parse 2))))
+
+    (put (obarray-put env "^") 'lbp 3)
+    (put (obarray-put env "^") 'led (lambda (left) (expt left (parse 3))))
+
+    (with-temp-buffer
+      (insert input)
+      (goto-char (point-min))
+      (let (left)
+        (while (not (eobp))
+          (setq left (parse 0)))
+        left))))
+#+end_src
+
+#+RESULTS:
+: 66
