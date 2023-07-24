@@ -1,0 +1,134 @@
+* Unary postfix
+Редуцированный язык с двумя литералами и одним постфиксным оператором.
+
+#+begin_src prog
+expr ::= 0 | 1 | expr!
+#+end_src
+
+
+#+begin_src emacs-lisp :var lexical-binding='t input="0!!!"
+(require 'cl-lib)
+
+(let ((env (obarray-make)) left)
+  (set (obarray-put env "0") (lambda (_left) 0))
+  (set (obarray-put env "1") (lambda (_left) 1))
+  (set (obarray-put env "!") (lambda (left) (aref [1 0] left)))
+  (cl-flet ((code ()
+              (cl-assert (looking-at "[01!]"))
+              (symbol-value (obarray-get env (match-string 0))))
+            (run (code)
+              (funcall code left))
+            (advance ()
+              (goto-char (match-end 0))))
+    (with-temp-buffer
+      (insert input)
+      (goto-char (point-min))
+      (while (not (eobp))
+        ;; q0
+        (setq left (run (code)))
+        (advance))
+      left)))
+#+end_src
+
+#+RESULTS:
+: 1
+
+* Unary prefix
+Редуцированный язык с двумя литералами и одним префиксным оператором.
+
+#+begin_src prog
+expr ::= 0 | 1 | !expr
+#+end_src
+
+#+begin_src emacs-lisp :var lexical-binding='t input="!!!1"
+(require 'cl-lib)
+
+(let ((env (obarray-make)) left)
+  (cl-flet ((code ()
+              (cl-assert (looking-at "[01!]"))
+              (symbol-value (obarray-get env (match-string 0))))
+            (run (code)
+              (funcall code left))
+            (advance ()
+              (goto-char (match-end 0))))
+    (set (obarray-put env "0") (lambda (_left) 0))
+    (set (obarray-put env "1") (lambda (_left) 1))
+    (set (obarray-put env "!")
+         (lambda (_left)
+           (let ((c (code)))
+             (advance)
+             (aref [1 0] (run c)))))
+    (with-temp-buffer
+      (insert input)
+      (goto-char (point-min))
+      (while (not (eobp))
+        ;; q0
+        (let ((c (code)))
+          (advance)
+          (setq left (run c))))
+      left)))
+#+end_src
+
+#+RESULTS:
+: 0
+
+* Infix
+#+begin_src prog
+expr ::= 0 | 1 | ¬expr | expr ∧ expr | expr ∨ expr
+#+end_src
+
+#+begin_src emacs-lisp
+(require 'cl-lib)
+
+(let ((env (obarray-make)))
+  (cl-flet* ((nud ()
+               (cl-assert (looking-at "[01¬∧∨]"))
+               (get (obarray-get env (match-string 0)) 'null-denotation))
+             (led ()
+               (cl-assert (looking-at "[01¬∧∨]"))
+               (get (obarray-get env (match-string 0)) 'left-denotation))
+             (lbp ()
+               (or (get (obarray-get env (match-string 0)) 'left-binding-power)
+                   0))
+             (run (code &optional left)
+               (funcall code left))
+             (advance ()
+               (goto-char (match-end 0)))
+             (parse (rbp &optional left)
+               (save-match-data
+                 ;; q0
+                 (let ((c (nud)))
+                   (advance)
+                   (let ((left (run c)))
+                     ;; q1
+                     (while (< rbp (lbp))
+                       (setq c (led))
+                       (advance)
+                       (setq left (run c left)))
+                     left)))))
+
+    (put (obarray-put env "0") 'null-denotation (lambda (_left) 0))
+    (put (obarray-put env "1") 'null-denotation (lambda (_left) 1))
+
+    (put (obarray-put env "¬") 'null-denotation
+         (lambda (_left)
+           (aref [1 0] (parse 0))))
+
+    (put (obarray-put env "∧") 'left-denotation
+         (lambda (left)
+           (aref [0 0 0 1] (- 3 (* 2 left) (parse 0)))))
+    (put (obarray-put env "∧") 'left-binding-power 3)
+
+    (put (obarray-put env "∨") 'left-denotation
+         (lambda (left)
+           (aref [0 1 1 1] (- 3 (* 2 left) (parse 0)))))
+    (put (obarray-put env "∨") 'left-denotation 2)
+
+    (with-temp-buffer
+      (insert "1∧0")
+      (goto-char (point-min))
+      (let (left)
+        (while (not (eobp))
+          (setq left (parse 0 left)))
+        left))))
+#+end_src
