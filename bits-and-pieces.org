@@ -232,3 +232,221 @@ lit ::= [0-1]+
 
 #+RESULTS:
 : 66
+
+* nud and led
+Язык с двузначными токенами.
+
+#+begin_src emacs-lisp :lexical t
+(require 'cl-lib)
+
+(let ((env (obarray-make))
+      (token-pattern "\\([0-9]+\\)\\|[+-]"))
+  (cl-flet*
+      ((nud ()
+         (cl-assert (looking-at token-pattern))
+         (let ((token (match-string 0)))
+           (cond
+            ((get (obarray-get env token) 'nud))
+            ((match-string 1)
+             (lambda ()
+               (string-to-number token)))
+            (t
+             (lambda ()
+               (error "No null denotation: `%s'" token))))))
+
+       (led (left)
+         (cl-assert (looking-at token-pattern))
+         (let* ((token (match-string 0))
+                (led (get (obarray-get env token) 'led)))
+           (cond
+            (led
+             (lambda ()
+               (funcall led left)))
+            (t
+             (lambda ()
+               (error "No left denotation: `%s'" token))))))
+
+       (lbp ()
+         (or (and (looking-at token-pattern)
+                  (get (obarray-get env (match-string 0)) 'lbp))
+             0))
+
+       (advance ()
+         (goto-char (match-end 0)))
+
+       (run (code)
+         (funcall code))
+
+       (parse (rbp)
+         ;; q0
+         (let ((c (nud)))
+           (advance)
+           (let ((left (run c)))
+             ;; q1
+             (while (< rbp (lbp))
+               (setq c (led left))
+               (advance)
+               (setq left (run c)))
+             left))))
+
+    (dolist (op '(+ -))
+      (let ((symbol (obarray-put env (symbol-name op))))
+        (put symbol 'nud (lambda () (funcall op (parse 0))))
+        (put symbol 'led (lambda (left) (funcall op left (parse 1))))
+        (put symbol 'lbp 1)))
+
+    (with-temp-buffer
+      (insert "--1+++1--1")
+      (goto-char (point-min))
+      ;; (pop-to-buffer (current-buffer))
+      (let (left)
+        (while (not (eobp))
+          (setq left (parse 0)))
+        left))))
+#+end_src
+
+* Prover
+Прувер, частично на Елиспе.
+
+#+begin_src emacs-lisp :lexical t :var input="(a→b)∧(b→c)→(a→c)?"
+(require 'cl-lib)
+
+(let ((env (obarray-make))
+      (token-pattern "[()?~→∧∨]\\|[a-z]+")
+      (k 1))
+
+  (cl-flet*
+      ;; denotation accessors
+      ((set-nud (name value)
+         (put (obarray-put env name) 'nud value))
+
+       (get-nud (name)
+         (when-let ((symbol (obarray-get env name)))
+           (get symbol 'nud)))
+
+       (set-led (name binding-power &optional function)
+         (let ((symbol (obarray-put env name)))
+           (put symbol 'led function)
+           (put symbol 'lbp binding-power)))
+
+       (get-led (name)
+         (when-let ((symbol (obarray-get env name)))
+           (get symbol 'led)))
+
+       (get-lbp (name)
+         (when-let ((symbol (obarray-get env name)))
+           (get symbol 'lbp)))
+
+       ;; prover primitives
+       (generate ()
+         (prog1
+             (vconcat (make-vector k 0)
+                      (make-vector k 1))
+           (cl-callf ash k 1)))
+
+       (isvalid (x)
+         (not (seq-some #'zerop x)))
+
+       (boole (m x y &optional op)
+         (let (result (i 0) (j 0))
+           (while (and (< i (length x))
+                       (< j (length y)))
+             (push (aref m (- 3 (* 2 (aref x i)) (aref y j)))
+                   result)
+             (cl-incf i)
+             (cl-incf j)
+             (pcase (cons (= i (length x))
+                          (= j (length y)))
+               ('(t . nil) (setq i 0))
+               ('(nil . t) (setq j 0))))
+           (message "boole(%s, %s, %s) = %s"
+                    (or op m) x y (vconcat (reverse result)))
+           (vconcat (reverse result))))
+
+       ;; language/parser primitives
+       (nud ()
+         (cl-assert (looking-at token-pattern))
+         (let ((self (match-string 0)))
+           (or (get-nud self)
+               (lambda ()
+                 (funcall (get-led "nonud") self)))))
+
+       (led (left)
+         (cl-assert (looking-at token-pattern))
+         (let ((led (or (get-led (match-string 0))
+                        (get-led "noled"))))
+           (lambda ()
+             (funcall led left))))
+
+       (lbp ()
+         (if (eobp)
+             0
+           (cl-assert (looking-at token-pattern))
+           (or (get-lbp (match-string 0)) 0)))
+
+       (advance ()
+         (goto-char (match-end 0)))
+
+       (run (code kind)
+         (cl-ecase kind
+           (nud
+            (if (functionp code)
+                (funcall code)
+              code))
+           (led
+            (funcall code))))
+
+       (parse (rbp)
+         ;; q0
+         (let ((c (nud)))
+           (advance)
+           (let ((left (run c 'nud)))
+             ;; q1
+             (while (< rbp (lbp))
+               (setq c (led left))
+               (advance)
+               (setq left (run c 'led)))
+             left)))
+
+       ;; helpers
+       (check (token)
+         (if (looking-at (regexp-quote token))
+             (advance)
+           (error "Missing `%s'" token))))
+
+    (set-led "nonud" nil
+             (lambda (self)
+               (cl-check-type self string)
+               (if (null (get-led self))
+                   (set-nud self (generate))
+                 (error "`%s' has no argument" self))))
+
+    (set-led "?" 1
+             (lambda (left)
+               (if (isvalid left)
+                   (message "Theorem")
+                 (message "Non-theorem"))
+               ;; (parse 1)
+               ))
+
+    (set-nud "\(" (lambda () (prog1 (parse 0) (check "\)"))))
+    (set-led "\)" 0)
+    ;; Ошибка, мы используем перевернутые таблицы истинности (не
+    ;; обратные, хотя для импликации эти понятия совпадают).
+    ;; (set-led "→" 2 (lambda (left) (boole [1 1 0 1] left (parse 1) "→")))
+    (set-led "→" 2 (lambda (left) (boole [1 0 1 1] left (parse 1) "→")))
+    (set-led "∨" 3 (lambda (left) (boole [1 1 1 0] left (parse 3) "∨")))
+    (set-led "∧" 4 (lambda (left) (boole [1 0 0 0] left (parse 4) "∧")))
+    (set-nud "~" (lambda () (boole [0 1 0 1] (parse 5) [0] "~")))
+
+    (with-temp-buffer
+      (insert input)
+      (goto-char (point-min))
+      (let (left)
+        (while (not (eobp))
+          (setq left (parse 0)))
+        left))))
+#+end_src
+
+#+RESULTS:
+: Theorem
