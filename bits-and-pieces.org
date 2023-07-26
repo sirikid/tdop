@@ -348,28 +348,22 @@ lit ::= [0-1]+
          (not (seq-some #'zerop x)))
 
        (boole (m x y &optional op)
-         (let (result (i 0) (j 0))
-           (while (and (< i (length x))
-                       (< j (length y)))
-             (push (aref m (- 3 (* 2 (aref x i)) (aref y j)))
-                   result)
-             (cl-incf i)
-             (cl-incf j)
-             (pcase (cons (= i (length x))
-                          (= j (length y)))
-               ('(t . nil) (setq i 0))
-               ('(nil . t) (setq j 0))))
-           (message "boole(%s, %s, %s) = %s"
-                    (or op m) x y (vconcat (reverse result)))
-           (vconcat (reverse result))))
+         (let* ((lx (length x))
+                (ly (length y))
+                (result (make-vector (max lx ly) 0)))
+           (dotimes (i (length result))
+             (let ((cx (aref x (% i lx)))
+                   (cy (aref y (% i ly))))
+               (aset result i (aref m (logxor #b11 (ash cx 1) cy)))))
+           ;; (message "boole(%s, %s, %s) = %s" (or op m) x y result)
+           result))
 
        ;; language/parser primitives
        (nud ()
          (cl-assert (looking-at token-pattern))
          (let ((self (match-string 0)))
            (or (get-nud self)
-               (lambda ()
-                 (funcall (get-led "nonud") self)))))
+               (funcall (get-led "nonud") self))))
 
        (led (left)
          (cl-assert (looking-at token-pattern))
@@ -387,25 +381,19 @@ lit ::= [0-1]+
        (advance ()
          (goto-char (match-end 0)))
 
-       (run (code kind)
-         (cl-ecase kind
-           (nud
-            (if (functionp code)
-                (funcall code)
-              code))
-           (led
-            (funcall code))))
+       (run (code)
+         (funcall code))
 
        (parse (rbp)
          ;; q0
          (let ((c (nud)))
            (advance)
-           (let ((left (run c 'nud)))
+           (let ((left (run c)))
              ;; q1
              (while (< rbp (lbp))
                (setq c (led left))
                (advance)
-               (setq left (run c 'led)))
+               (setq left (run c)))
              left)))
 
        ;; helpers
@@ -418,7 +406,8 @@ lit ::= [0-1]+
              (lambda (self)
                (cl-check-type self string)
                (if (null (get-led self))
-                   (set-nud self (generate))
+                   (let ((truth-table (generate)))
+                     (set-nud self (lambda () truth-table)))
                  (error "`%s' has no argument" self))))
 
     (set-led "?" 1
@@ -440,6 +429,7 @@ lit ::= [0-1]+
     (set-nud "~" (lambda () (boole [0 1 0 1] (parse 5) [0] "~")))
 
     (with-temp-buffer
+      ;; (pop-to-buffer (current-buffer))
       (insert input)
       (goto-char (point-min))
       (let (left)
