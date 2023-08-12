@@ -318,24 +318,19 @@ lit ::= [0-1]+
   (cl-flet*
       ;; denotation accessors
       ((set-nud (name value)
-         (put (obarray-put env name) 'nud value))
+         (set (obarray-put env name) value))
 
        (get-nud (name)
-         (when-let ((symbol (obarray-get env name)))
-           (get symbol 'nud)))
+         (symbol-value (obarray-get env name)))
 
-       (set-led (name binding-power &optional function)
-         (let ((symbol (obarray-put env name)))
-           (put symbol 'led function)
-           (put symbol 'lbp binding-power)))
+       (set-led (name binding-power function)
+         (fset (obarray-put env name) (cons binding-power function)))
 
        (get-led (name)
-         (when-let ((symbol (obarray-get env name)))
-           (get symbol 'led)))
+         (cdr (symbol-function (obarray-get env name))))
 
        (get-lbp (name)
-         (when-let ((symbol (obarray-get env name)))
-           (get symbol 'lbp)))
+         (car (symbol-function (obarray-get env name))))
 
        ;; prover primitives
        (generate ()
@@ -355,7 +350,7 @@ lit ::= [0-1]+
              (let ((cx (aref x (% i lx)))
                    (cy (aref y (% i ly))))
                (aset result i (aref m (logxor #b11 (ash cx 1) cy)))))
-           ;; (message "boole(%s, %s, %s) = %s" (or op m) x y result)
+           (message "boole(%s, %s, %s) = %s" (or op m) x y result)
            result))
 
        ;; language/parser primitives
@@ -419,18 +414,21 @@ lit ::= [0-1]+
                ))
 
     (set-nud "\(" (lambda () (prog1 (parse 0) (check "\)"))))
-    (set-led "\)" 0)
+    (set-led "\)" 0 nil)
     ;; Ошибка, мы используем перевернутые таблицы истинности (не
     ;; обратные, хотя для импликации эти понятия совпадают).
     ;; (set-led "→" 2 (lambda (left) (boole [1 1 0 1] left (parse 1) "→")))
     (set-led "→" 2 (lambda (left) (boole [1 0 1 1] left (parse 1) "→")))
     (set-led "∨" 3 (lambda (left) (boole [1 1 1 0] left (parse 3) "∨")))
     (set-led "∧" 4 (lambda (left) (boole [1 0 0 0] left (parse 4) "∧")))
-    (set-nud "~" (lambda () (boole [0 1 0 1] (parse 5) [0] "~")))
+    ;; Вторая ошибка, отрицание можно реализовать как сравнение с 0,
+    ;; но таблица истинности для эквивалентности 1001, а не 0101.
+    ;; Выражение для проверки: a∧~a→b
+    (set-nud "~" (lambda () (boole [1 0 0 1] (parse 5) [0] "~")))
 
     (with-temp-buffer
       ;; (pop-to-buffer (current-buffer))
-      (insert input)
+      (insert "a∧~a→b→c→d→foo?")
       (goto-char (point-min))
       (let (left)
         (while (not (eobp))

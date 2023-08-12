@@ -1,0 +1,337 @@
+#+title: Top Down Operator Precedence
+#+subtitle: Примеры из статьи и по мотивам
+#+author: Иван Соколов
+#+property: header-args dot :exports results
+#+property: header-args emacs-lisp :lexical t :exports both
+
+Код ниже это примеры из статьи Вона Пратта [[https://tdop.github.io/][Top Down Operator
+Precedence]] и моё творчество по её мотивам.  Может быть выполнение их
+с отладчиком поможет вам лучше понять идеи изложенные в ней.
+
+* Язык с постфиксным оператором
+Очень простой язык -- всего два нульарных оператора и один постфиксный
+унарный.  Каждый оператор (токен) состоит из одного знака, а
+семантический код токена это просто функция без аргументов.
+Реализация ~run~ и ~advance~ в таких условиях тривиальна.
+
+#+begin_src emacs-lisp
+(require 'cl-lib)
+
+(cl-flet
+    ((code ()
+       (cl-ecase (char-after)
+         (?0 (lambda () 0))
+         (?1 (lambda () 1))
+         (?! (lambda () (aref [1 0] left)))))
+     (run (code)
+       (funcall code))
+     (advance ()
+       (forward-char)))
+  (with-temp-buffer
+    ;; Для наглядности интерактивного исполнения с edebug
+    ;; (pop-to-buffer (current-buffer))
+    (insert "0!!!")
+    (goto-char (point-min))
+    (dlet (left)
+      (while (not (eobp))
+        ;; q0
+        (setq left (run (code)))
+        (advance))
+      left)))
+#+end_src
+
+#+RESULTS:
+: 1
+
+Я оставил ~left~ в семантическом коде свободной переменной чтобы
+приблизить свой пример к образцу в статье (если его можно так
+назвать):
+
+#+begin_src dot :file fig1.png
+digraph {
+    q0 -> q0 [label=" left ← run code;\l advance\l" fontname="monospace"]
+}
+#+end_src
+
+#+RESULTS:
+[[file:fig1.png]]
+
+* Язык с префиксными операторами
+Второй язык очень похож на первый, только оператор отрицания стал
+префиксным и добавился префиксный бинарный оператор "исключающее или".
+
+Префиксные операторы не используют значение ~left~, но вызывают
+парсер, поэтому он стал отдельной функцией.  Каждый оператор вызывает
+парсер столько раз, сколько у него аргументов.  Чтобы избежать
+взаимной зависимости ~code~ и ~parse~ семантические коды символов
+теперь хранятся в [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Creating-Symbols][obarray]].
+
+#+begin_src emacs-lisp
+(require 'cl-lib)
+
+(let ((env (obarray-make)))
+  (cl-flet*
+      ((code ()
+         (let ((ch (char-after)))
+           (or (obarray-get env (char-to-string ch))
+               (error "`%c' is not an operator" ch))))
+       (run (code)
+         (funcall code))
+       (advance ()
+         (forward-char))
+       (parse ()
+         ;; q0
+         (let ((c (code)))
+           (advance)
+           (run c))))
+    (defalias (obarray-put env "0") (lambda () 0))
+    (defalias (obarray-put env "1") (lambda () 1))
+    (defalias (obarray-put env "!")
+      (lambda ()
+        (aref [1 0] (parse))))
+    (defalias (obarray-put env "^")
+      (lambda ()
+        (aref (aref [[0 1] [1 0]]
+                    (parse))
+              (parse))))
+    (with-temp-buffer
+      ;; (pop-to-buffer (current-buffer))
+      (insert "^!01")
+      (goto-char (point-min))
+      (let (left)
+        (while (not (eobp))
+          (setq left (parse)))
+        left))))
+#+end_src
+
+#+RESULTS:
+: 0
+
+Схема парсера получается такой:
+
+#+begin_src dot :file fig2.png
+digraph {
+    q0 -> q0 [label=" c ← code;\l advance;\l left ← run c\l" fontname="monospace"]
+}
+#+end_src
+
+#+RESULTS:
+[[file:fig2.png]]
+
+* Прувер на Elisp
+Главный пример из статьи.  Я переписал его на Elisp, потому что
+оригинал написан на неизвестном мне языке.  Начнем сразу со схемы
+парсера (~/~ отделяет условие от тела цикла):
+
+#+begin_src dot :file fig3.png
+digraph {
+    q0 -> q1 [label=" c ← nud;\l advance;\l left ← run c\l" fontname="monospace"]
+    q1 -> q1 [label=" lbp < rbp/\l c ← led;\l advance;\l left ← run c\l" fontname="monospace"]
+}
+#+end_src
+
+#+RESULTS:
+[[file:fig3.png]]
+
+Основные моменты реализации не поменялись, но появились ~lbp~ и ~rbp~,
+а токены могут быть длиннее одного символа.
+
+#+begin_src emacs-lisp
+(require 'cl-lib)
+
+(dolist (prop '(nud led lbp))
+  (defalias (intern (format "get-%s" prop))
+    (lambda (env token)
+      (get (obarray-get env token)
+           prop))
+    (format "Get property `%s' of symbol named TOKEN in obarray ENV." prop))
+  (defalias (intern (format "set-%s" prop))
+    (lambda (env token value)
+      (put (obarray-put env token)
+           prop
+           value))
+    (format "Set property `%s' of symbol named TOKEN in obarray ENV to VALUE."
+            prop)))
+
+(let ((env (obarray-make))
+      (token-pattern "[()?~→∨∧]\\|[a-z]+")
+      (k 1))
+  (cl-flet*
+      (;; Примитивы прувера
+       (generate ()
+         (prog1
+             (vconcat (make-vector k 0)
+                      (make-vector k 1))
+           (cl-incf k k)))
+       (isvalid (x)
+         (not (seq-some #'zerop x)))
+       (boole (m x y)
+         (let* ((lx (length x))
+                (ly (length y))
+                (result (make-vector (max lx ly) 0)))
+           (dotimes (i (length result))
+             (let ((cx (aref x (% i lx)))
+                   (cy (aref y (% i ly))))
+               (aset result i (aref m (- 3 (* 2 cx) cy)))))
+           ;; `trace-function' не работает на функциях из `cl-flet'
+           ;; (message "boole(%s, %s, %s) = %s" m x y result)
+           result))
+       ;; Парсер
+       (nud ()
+         (or (get-nud env (match-string 0))
+             (get-nud env "nonud")))
+       (led ()
+         (or (get-led env (match-string 0))
+             (get-led env "noled")))
+       (lbp ()
+         (or (get-lbp env (match-string 0))
+             (get-lbp env "nolbp")))
+       (run (code)
+         (funcall code))
+       (advance ()
+         (goto-char (match-end 0)))
+       (parse (rbp)
+         ;; q0
+         (cl-assert (looking-at token-pattern))
+         (let ((c (nud)))
+           (advance)
+           (dlet ((left (run c)))
+             ;; q1
+             (while (unless (eobp)
+                      (cl-assert (looking-at token-pattern))
+                      (< rbp (lbp)))
+               (setq c (led))
+               (advance)
+               (setq left (run c)))
+             left)))
+       ;; Вспомогательные функции
+       (check (str)
+         (cl-assert (looking-at (regexp-quote str)) nil "Missing `%s'" str)
+         (goto-char (match-end 0))))
+    ;; Заполняем окружение
+    (set-nud env "nonud"
+             (lambda ()
+               (let ((self (match-string 0)))
+                 (if (null (get-led env self))
+                     (let ((truth-table (generate)))
+                       (set-nud env self (lambda () truth-table))
+                       truth-table)
+                   (error "`%s' has no arguments" self)))))
+
+    (set-led env "?"
+             (lambda ()
+               (if (isvalid left)
+                   (message "Theorem")
+                 (message "Non-theorem"))
+               ;; Этот вызов имеет смысл в интерактивном режиме,
+               ;; которого у меня нету.
+               ;; (parse 1)
+               ))
+    (set-lbp env "?" 1)
+
+    (set-nud env "\(" (lambda () (prog1 (parse 0) (check "\)"))))
+    (set-lbp env "\)" 0)
+
+    (set-led env "→" (lambda () (boole [1 0 1 1] left (parse 1))))
+    (set-lbp env "→" 2)
+
+    (set-led env "∨" (lambda () (boole [1 1 1 0] left (parse 3))))
+    (set-lbp env "∨" 3)
+
+    (set-led env "∧" (lambda () (boole [1 0 0 0] left (parse 4))))
+    (set-lbp env "∧" 4)
+
+    (set-nud env "~" (lambda () (boole [1 0 0 1] (parse 5) [0])))
+
+    (with-temp-buffer
+      ;; (pop-to-buffer (current-buffer))
+      (insert "(a→b)∧(b→c)→(a→c)?")
+      (goto-char (point-min))
+      (parse 0))))
+#+end_src
+
+#+RESULTS:
+: Theorem
+
+Во время проверки своей реализации я обнаружил две опечатки в статье,
+таблицы истинности для импликации и эквивалентности были неверны.
+Эквивалентность отсутствует в языке "прувера", но через
+эквивалентность лжи реализовано отрицание.
+
+#+name: Таблицы истинности
+| x | y | x→y | x≡y |
+|---+---+-----+-----|
+| 1 | 1 |   1 |   1 |
+| 1 | 0 |   0 |   0 |
+| 0 | 1 |   1 |   0 |
+| 0 | 0 |   1 |   1 |
+
+#+name: Неверная таблица для импликации
+#+begin_example
+led("→") ← 'boole("1101", left, parse 1)';
+lbp("→") ← 2;
+#+end_example
+
+#+name: Неверная таблица для эквивалентности
+#+begin_example
+nud("~") ← 'boole("0101", parse 5, "0")'
+#+end_example
+
+* Bencode
+Это довольно простой [[https://ru.wikipedia.org/wiki/Bencode][формат]], в основном известный по использованию в
+протоколе BitTorrent.  Я наткнулся на его описание после чтения TDOP и
+решил проверить на нём практическую применимость методик Пратта.
+
+#+begin_src emacs-lisp :eval no
+(eval-when-compile
+  (require 'cl-lib))
+
+(defun bc-parse ()
+  (cl-flet ((check (regexp message)
+              (cl-assert (looking-at regexp) t message)
+              (goto-char (match-end 0))))
+    (check "[dil]\\|[0-9]+" "Expected start of token")
+    (pcase-exhaustive (match-string 0)
+      ("d"                              ;dictionary
+       (let (result)
+         (while (not (looking-at-p "e\\|\\'"))
+           (push (cons (bc-parse)
+                       (bc-parse))
+                 result))
+         (check "e" "Expected end of dictionary marker")
+         (reverse result)))
+      ("i"                              ;integer
+       (check "0\\|-?[1-9][0-9]*"
+              "Expected decimal integer without leading zeros")
+       (prog1 (string-to-number (match-string 0))
+         (check "e" "Expected end of integer marker")))
+      ("l"                              ;list
+       (let (result)
+         (while (not (looking-at-p "e\\|\\'"))
+           (push (bc-parse) result))
+         (check "e" "Expected end of list marker")
+         (vconcat (reverse result))))
+      ((app string-to-number length)    ;bytestring
+       (check ":" "Expected bytestring length/content separator")
+       (let* ((start (point))
+              (end (+ start length)))
+         (cl-assert (<= end (point-max)) t "Unexpected end of buffer")
+         (goto-char end)
+         (buffer-substring-no-properties start end))))))
+#+end_src
+
+Изначально код был написан "по всем правилам", но потом я встроил все
+функции, которые использовались по одному разу.  В итоге осталась
+только ~parse~ и модифицированный вариант ~check~, который
+использовался только внутри ~parse~.
+
+В принципе можно переписать на ~check~ и разбор строк, но я не
+уверен в производительности этого решения.
+
+#+begin_src emacs-lisp :eval no
+;; bytestring
+(check ":" "Expected bytestring length/content separator")
+(check (format "\\(\n\\|.\\)\\{%d\\}" length)
+       (format "Expected at least %d bytes" length))
+(match-string 0)
+#+end_src
