@@ -1,0 +1,267 @@
+#+title: Заметки
+
+Предполагается что читатель ознакомился со статьей Вона Пратта [[https://tdop.github.io/][Top
+Down Operator Precedence]], но по какой-либо причине не захотел
+вчитываться в пятидесятилетние примеры кода на выдуманном языке.
+
+* Язык с постфиксным оператором
+Очень простой язык -- всего два нульарных оператора и один постфиксный
+унарный.  Каждый оператор (токен) состоит из одного знака, а
+семантический код токена это просто функция без аргументов.
+Реализация ~run~ и ~advance~ в таких условиях тривиальна.
+
+#+begin_src emacs-lisp :lexical t
+(require 'cl-lib)
+
+(cl-flet
+    ((code ()
+       (cl-ecase (char-after)
+         (?0 (lambda () 0))
+         (?1 (lambda () 1))
+         (?! (lambda () (aref [1 0] left)))))
+     (run (code)
+       (funcall code))
+     (advance ()
+       (forward-char)))
+  (with-temp-buffer
+    ;; Для наглядности интерактивного исполнения с edebug
+    ;; (pop-to-buffer (current-buffer))
+    (insert "0!!!")
+    (goto-char (point-min))
+    (dlet (left)
+      (while (not (eobp))
+        ;; q0
+        (setq left (run (code)))
+        (advance))
+      left)))
+#+end_src
+
+#+RESULTS:
+: 1
+
+Я оставил ~left~ в семантическом коде свободной переменной чтобы
+приблизить свой пример к образцу в статье (если его можно так
+назвать):
+
+#+begin_src dot :file fig1.png
+digraph {
+    q0 -> q0 [label=" left ← run code;\l advance\l" fontname="monospace"]
+}
+#+end_src
+
+#+RESULTS:
+[[file:fig1.png]]
+
+* Язык с префиксным оператором
+Второй язык очень похож на первый, только оператор отрицания стал
+префиксным и добавился префиксный бинарный оператор "исключающее или".
+
+Префиксные операторы не используют значение ~left~, но вызывают
+парсер, поэтому он теперь сделан отдельной функцией.  Каждый оператор
+вызывает парсер столько раз, сколько у него аргументов.  Чтобы
+избежать взаимной зависимости ~code~ и ~parse~ семантические коды
+символов теперь хранятся в [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Creating-Symbols][obarray]].
+
+#+begin_src emacs-lisp :lexical t
+(require 'cl-lib)
+
+(let ((env (obarray-make)))
+  (cl-flet*
+      ((code ()
+         (let ((ch (char-after)))
+           (or (obarray-get env (char-to-string ch))
+               (error "`%c' is not an operator" ch))))
+       (run (code)
+         (funcall code))
+       (advance ()
+         (forward-char))
+       (parse ()
+         ;; q0
+         (let ((c (code)))
+           (advance)
+           (run c))))
+    (defalias (obarray-put env "0") (lambda () 0))
+    (defalias (obarray-put env "1") (lambda () 1))
+    (defalias (obarray-put env "!")
+      (lambda ()
+        (aref [1 0] (parse))))
+    (defalias (obarray-put env "^")
+      (lambda ()
+        (aref (aref [[0 1] [1 0]]
+                    (parse))
+              (parse))))
+    (with-temp-buffer
+      ;; (pop-to-buffer (current-buffer))
+      (insert "^!01")
+      (goto-char (point-min))
+      (let (left)
+        (while (not (eobp))
+          (setq left (parse)))
+        left))))
+#+end_src
+
+#+RESULTS:
+: 0
+
+* Прувер
+
+#+begin_src dot :file fig2.png
+digraph {
+    q0 -> q1 [label=" c ← nud;\l advance;\l left ← run c\l" fontname="monospace"]
+    q1 -> q1 [label=" lbp < rbp/\l c ← led;\l advance;\l left ← run c\l" fontname="monospace"]
+}
+#+end_src
+
+#+RESULTS:
+[[file:fig2.png]]
+
+#+begin_src emacs-lisp :lexical t
+(require 'cl-lib)
+
+(dolist (prop '(nud led lbp))
+  (defalias (intern (format "get-%s" prop))
+    (lambda (env token)
+      (get (obarray-get env token)
+           prop)))
+  (defalias (intern (format "set-%s" prop))
+    (lambda (env token value)
+      (put (obarray-put env token)
+           prop
+           value))))
+
+(let ((env (obarray-make))
+      (token-pattern "[()?~→∨∧]\\|[a-z]+")
+      (k 1))
+  (cl-flet*
+      ;; Примитивы прувера
+      ((generate ()
+         (prog1
+             (vconcat (make-vector k 0)
+                      (make-vector k 1))
+           (cl-callf * k 2)))
+       (isvalid (x)
+         (not (seq-some #'zerop x)))
+       (boole (m x y &optional op)
+         (let* ((lx (length x))
+                (ly (length y))
+                (result (make-vector (max lx ly) 0)))
+           (dotimes (i (length result))
+             (let ((cx (aref x (% i lx)))
+                   (cy (aref y (% i ly))))
+               (aset result i (aref m (logxor #b11 (ash cx 1) cy)))))
+           (message "boole(%s, %s, %s) = %s" (or op m) x y result)
+           result))
+       ;; Элементы парсера
+       (nud ()
+         (or (get-nud env (match-string 0))
+             (get-nud env "nonud")
+             (error "`%s' is not nullary operator" (match-string 0))))
+       (led ()
+         (or (get-led env (match-string 0))
+             (get-led env "noled")
+             (error "`%s' is not left associative operator" (match-string 0))))
+       (lbp ()
+         (or (get-lbp env (match-string 0))
+             (get-lbp env "nolbp")
+             (error "`%s' has no left binding power")))
+       (run (code)
+         (funcall code))
+       (advance ()
+         (goto-char (match-end 0)))
+       (parse (rbp)
+         ;; q0
+         (cl-assert (looking-at token-pattern))
+         (let ((c (nud)))
+           (advance)
+           (dlet ((left (run c)))
+             ;; q1
+             (while (and (looking-at token-pattern)
+                         (< rbp (lbp)))
+               (setq c (led))
+               (advance)
+               (setq left (run c)))
+             left)))
+       (check (str)
+         (cl-assert (looking-at (regexp-quote str)) nil "Missing `%s'" str)
+         (goto-char (match-end 0))))
+
+    (set-nud env "nonud"
+             (lambda ()
+               (let ((self (match-string 0)))
+                 (if (null (get-led env self))
+                     (let ((truth-table (generate)))
+                       (set-nud env self (lambda () truth-table))
+                       truth-table)
+                   (error "`%s' has no arguments" self)))))
+
+    (set-led env "?"
+             (lambda ()
+               (if (isvalid left)
+                   (message "Theorem")
+                 (message "Non-theorem"))
+               ;; Этот вызов нужен для интерактивного режима
+               ;; (parse 1)
+               ))
+    (set-lbp env "?" 1)
+
+    (set-nud env "\(" (lambda () (prog1 (parse 0) (check "\)"))))
+    (set-lbp env "\)" 0)
+
+    (set-led env "→" (lambda () (boole [1 0 1 1] left (parse 1))))
+    (set-lbp env "→" 2)
+
+    (set-led env "∨" (lambda () (boole [1 1 1 0] left (parse 3))))
+    (set-lbp env "∨" 3)
+
+    (set-led env "∧" (lambda () (boole [1 0 0 0] left (parse 4))))
+    (set-lbp env "∧" 4)
+
+    (set-nud env "~" (lambda () (boole [1 0 0 1] (parse 5) [0])))
+
+    (with-temp-buffer
+      ;; (pop-to-buffer (current-buffer))
+      (insert "(a→b)∧(b→c)→(a→c)?")
+      (goto-char (point-min))
+      (let (left)
+        (while (not (eobp))
+          (setq left (parse 0)))
+        left))))
+#+end_src
+
+* Bencode-TDOP
+#+begin_src emacs-lisp :lexical t
+(require 'cl-lib)
+
+(defun bt-parse ()
+  (cl-flet ((check (regexp message)
+              (cl-assert (looking-at regexp) t message)
+              (goto-char (match-end 0))))
+    (check "[dil]\\|[0-9]+" "Expected start of token")
+    (pcase-exhaustive (match-string 0)
+      ("d"                              ;dictionary
+       (let (result)
+         (while (not (looking-at-p "e\\|\\'"))
+           (push (cons (bt-parse) (bt-parse)) result))
+         (check "e" "Expected end of dictionary marker")
+         (reverse result)))
+      ("i"                              ;integer
+       (check "0\\|-?[1-9][0-9]*"
+              "Expected decimal integer without leading zeros")
+       (prog1 (string-to-number (match-string 0))
+         (check "e" "Expected end of integer marker")))
+      ("l"                              ;list
+       (let (result)
+         (while (not (looking-at-p "e\\|\\'"))
+           (push (bt-parse) result))
+         (check "e" "Expected end of list marker")
+         (vconcat (reverse result))))
+      ((app string-to-number length)    ;bytestring
+       (check ":" "Expected bytestring length/content separator")
+       ;; (check (format ".\\{%d\\}" length)
+       ;;        (format "Expected at least %d bytes" length))
+       (let* ((start (point))
+              (end (+ start length)))
+         (cl-assert (<= end (point-max)) t "Unexpected end of buffer")
+         (goto-char end)
+         (buffer-substring-no-properties start end))))))
+#+end_src
