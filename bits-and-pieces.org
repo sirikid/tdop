@@ -5,29 +5,32 @@
 expr ::= 0 | 1 | expr!
 #+end_src
 
+#+name: unpost
 #+begin_src emacs-lisp :lexical t :var input="0!!!"
 (require 'cl-lib)
 
-(let ((env (obarray-make)) left)
-  (set (obarray-put env "0") (lambda (_left) 0))
-  (set (obarray-put env "1") (lambda (_left) 1))
-  (set (obarray-put env "!") (lambda (left) (aref [1 0] left)))
-  (cl-flet ((code ()
-              (cl-assert (looking-at "[01!]"))
-              (symbol-value (obarray-get env (match-string 0))))
-            (run (code)
-              (funcall code left))
-            (advance ()
-              (goto-char (match-end 0))))
-    (with-temp-buffer
-      (insert input)
-      (goto-char (point-min))
+(cl-flet ((code ()
+            (cl-ecase (char-after)
+              (?0 0)
+              (?1 1)
+              (?! '(aref [1 0] left))))
+          (run (code)
+            (eval code))
+          (advance ()
+            (forward-char)))
+  (with-temp-buffer
+    (insert input)
+    (goto-char (point-min))
+    (dlet (left)
       (while (not (eobp))
         ;; q0
         (setq left (run (code)))
         (advance))
       left)))
 #+end_src
+
+#+RESULTS: unpost
+: 1
 
 #+RESULTS:
 : 1
