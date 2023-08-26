@@ -281,6 +281,7 @@ nud("~") ← 'boole("0101", parse 5, "0")'
 Это довольно простой [[https://ru.wikipedia.org/wiki/Bencode][формат]], в основном известный по использованию в
 протоколе BitTorrent.  Я наткнулся на его описание после чтения TDOP и
 решил проверить на нём практическую применимость методик Пратта.
+Полный код проекта доступен на [[https://git.sr.ht/~sokolov/sbencode][SourceHut]].
 
 #+begin_src emacs-lisp :eval no
 (eval-when-compile
